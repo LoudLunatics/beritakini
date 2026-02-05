@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/api-berita/:path*",
-      "destination": "https://berita-indo-api-next.vercel.app/api/:path*"
-    }
-  ]
-}
