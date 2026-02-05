@@ -1,0 +1,40 @@
+:root {
+  --bs-primary: #007bff; 
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #ffffff;
+  color: #212529;
+}
+
+/* Menghilangkan dekorasi link secara global */
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* Transisi halus untuk hover pada kartu atau tombol */
+.btn, .card {
+  transition: all 0.3s ease;
+}
+
+/* Custom scrollbar agar lebih modern */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #aaa;
+}
