@@ -1,12 +1,13 @@
 import { CACHE_TTL_MS } from '../constants/config';
 
-const isLocal = window.location.hostname === 'localhost';
-const BASE_URL = 'https://berita-indo-api-next.vercel.app/api';
-
-// Ambil cache dari localStorage agar web dibuka langsung muncul berita
+// Inisialisasi cache dari localStorage agar berita muncul instan 0ms
 const getStorageCache = () => {
-  const saved = localStorage.getItem('news_cache_persistent');
-  return saved ? new Map(JSON.parse(saved)) : new Map();
+  try {
+    const saved = localStorage.getItem('news_cache_persistent');
+    return saved ? new Map(JSON.parse(saved)) : new Map();
+  } catch (e) {
+    return new Map();
+  }
 };
 
 const cache = getStorageCache();
@@ -17,34 +18,32 @@ const saveToStorage = () => {
 
 export const getNews = async (source = 'cnbc-news', category = '', signal = null) => {
   const path = category ? `${source}/${category}` : source;
-  const targetUrl = `${BASE_URL}/${path}`;
   
-  // 1. Instant Load dari Cache
-  const cached = cache.get(targetUrl);
-  if (cached) {
-    const isStale = Date.now() - cached.at > CACHE_TTL_MS;
-    if (isStale) fetchAndUpdate(targetUrl, path); // Update di background
+  // GUNAKAN PATH INI: Ini akan melewati proxy Vercel Rewrites
+  const endpoint = `/api-berita/${path}`;
+
+  // 1. Cek Cache (Instant Load)
+  const cached = cache.get(endpoint);
+  if (cached && (Date.now() - cached.at < CACHE_TTL_MS)) {
     return cached.data;
   }
 
-  return await fetchAndUpdate(targetUrl, path, signal);
-};
-
-// Fungsi helper untuk fetch langsung (Tanpa Proxy AllOrigins)
-const fetchAndUpdate = async (targetUrl, path, signal = null) => {
+  // 2. Fetch Data
   try {
-    const response = await fetch(targetUrl, { signal });
-    if (!response.ok) throw new Error("Gagal Fetch");
+    const response = await fetch(endpoint, { signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     
     const result = await response.json();
     const data = result.data || [];
 
     if (data.length > 0) {
-      cache.set(targetUrl, { data, at: Date.now() });
+      cache.set(endpoint, { data, at: Date.now() });
       saveToStorage();
     }
     return data;
   } catch (e) {
-    return [];
+    if (e.name === 'AbortError') return [];
+    // Jika gagal fetch, tampilkan data lama dari cache jika ada
+    return cached ? cached.data : [];
   }
 };
