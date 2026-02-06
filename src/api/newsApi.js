@@ -1,93 +1,90 @@
 import { CACHE_TTL_MS } from '../constants/config';
 
 const BASE_URL = 'https://berita-indo-api-next.vercel.app/api';
+const PROXY_URL = 'https://api.allorigins.win/get?url=';
 
-/**
- * Fungsi untuk mengambil cache dari LocalStorage (Data Map)
+// In-memory cache untuk akses secepat kilat
+let cache = new Map();
+
+/** * Memuat cache dengan sistem pembersihan (Pruning)
  */
-const getStorageCache = () => {
-  try {
-    const saved = localStorage.getItem('news_cache_persistent');
-    if (!saved) return new Map();
-    // Konversi kembali dari Array format ke Map
-    return new Map(JSON.parse(saved));
-  } catch (e) {
-    console.error("Gagal memuat cache:", e);
-    return new Map();
-  }
+const initCache = () => {
+    try {
+        const saved = localStorage.getItem('news_cache_persistent');
+        if (!saved) return;
+        const parsed = JSON.parse(saved);
+        // Hanya ambil data yang belum basi lebih dari 2 hari untuk hemat storage
+        const now = Date.now();
+        const filtered = parsed.filter(([_, val]) => now - val.at < 86400000 * 2);
+        cache = new Map(filtered);
+    } catch (e) {
+        console.error("Cache Init Error:", e);
+    }
 };
 
-const cache = getStorageCache();
+initCache();
 
-/**
- * Fungsi untuk simpan permanen ke LocalStorage
- */
 const saveToStorage = () => {
-  try {
-    const dataArray = Array.from(cache.entries());
-    localStorage.setItem('news_cache_persistent', JSON.stringify(dataArray));
-  } catch (e) {
-    console.error("Gagal menyimpan ke storage:", e);
-  }
+    try {
+        const dataArray = Array.from(cache.entries());
+        // Gunakan setTimeout agar tidak menghambat thread utama UI
+        setTimeout(() => {
+            localStorage.setItem('news_cache_persistent', JSON.stringify(dataArray));
+        }, 0);
+    } catch (e) {
+        console.warn("Storage Full:", e);
+    }
 };
 
 /**
- * Fungsi Utama dengan penanganan CORS Otomatis
+ * Fungsi Fetch Ringan dengan timeout otomatis
  */
 export const getNews = async (source = 'cnbc-news', category = '', signal = null) => {
-  const path = category ? `${source}/${category}` : source;
-  const targetUrl = `${BASE_URL}/${path}`;
+    const path = category ? `${source}/${category}` : source;
+    const targetUrl = `${BASE_URL}/${path}`;
+    const now = Date.now();
 
-  // 1. CEK CACHE (Muncul instan 0ms)
-  const cached = cache.get(targetUrl);
-  if (cached && (Date.now() - cached.at < CACHE_TTL_MS)) {
-    console.log(`⚡ Load dari cache: ${path}`);
-    return cached.data;
-  }
-
-  // 2. STRATEGI FETCH: Coba Langsung -> Gagal? -> Pakai Proxy
-  try {
-    console.log(`🌐 Mencoba fetch langsung: ${path}`);
-    const response = await fetch(targetUrl, { signal });
-    
-    // Jika kena CORS, fetch biasanya langsung lempar ke catch, 
-    // tapi jika status tidak 200, kita lempar manual.
-    if (!response.ok) throw new Error("Direct fetch failed");
-
-    const result = await response.json();
-    const data = result.data || [];
-
-    if (data.length > 0) {
-      cache.set(targetUrl, { data, at: Date.now() });
-      saveToStorage();
+    // 1. HIT CACHE (Instan)
+    const cached = cache.get(targetUrl);
+    if (cached && (now - cached.at < CACHE_TTL_MS)) {
+        return cached.data;
     }
-    return data;
 
-  } catch (error) {
-    // Abaikan jika request sengaja dibatalkan (AbortController)
-    if (error.name === 'AbortError') return cached?.data || [];
+    // 2. LOGIKA FETCH CEPAT
+    const controller = new AbortController();
+    const fetchSignal = signal || controller.signal;
 
-    console.warn(`⚠️ CORS Blocked/Error. Mengalihkan ke Proxy untuk: ${source}`);
+    // Fungsi fetch dengan AllOrigins sebagai backup otomatis
+    const fetchData = async () => {
+        try {
+            // Coba fetch langsung
+            const response = await fetch(targetUrl, { signal: fetchSignal });
+            if (!response.ok) throw new Error("Direct Fail");
+            const result = await response.json();
+            return result.data || [];
+        } catch (err) {
+            if (err.name === 'AbortError') throw err;
+            
+            // Jika gagal/CORS, langsung pindah ke proxy
+            const proxyRes = await fetch(`${PROXY_URL}${encodeURIComponent(targetUrl)}`);
+            const proxyJson = await proxyRes.json();
+            const actualData = JSON.parse(proxyJson.contents);
+            return actualData.data || [];
+        }
+    };
 
-    // JALUR PROXY (AllOrigins) - Solusi untuk EdgeOne
     try {
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-      const proxyRes = await fetch(proxyUrl);
-      const proxyJson = await proxyRes.json();
-      
-      // AllOrigins membungkus hasil asli di dalam string 'contents'
-      const actualData = JSON.parse(proxyJson.contents);
-      const data = actualData.data || [];
+        // Jalankan fetch
+        const data = await fetchData();
 
-      if (data.length > 0) {
-        cache.set(targetUrl, { data, at: Date.now() });
-        saveToStorage();
-      }
-      return data;
-    } catch (proxyError) {
-      console.error("🔴 Semua metode fetch gagal:", proxyError);
-      // Jika internet mati/proxy down, tampilkan data lama dari cache (Last Resort)
-      return cached ? cached.data : [];
+        if (data && data.length > 0) {
+            cache.set(targetUrl, { data, at: now });
+            saveToStorage();
+            return data;
+        }
+        return cached?.data || [];
+    } catch (error) {
+        // Jika offline atau error total, berikan data lama yang tersisa di cache
+        return cached?.data || [];
     }
-  }
 };
