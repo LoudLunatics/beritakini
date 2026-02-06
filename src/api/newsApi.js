@@ -3,23 +3,25 @@ import { CACHE_TTL_MS } from '../constants/config';
 const BASE_URL = 'https://berita-indo-api-next.vercel.app/api';
 
 /**
- * UPGRADE PROXY: Menempatkan AllOrigins sebagai garda terdepan 
- * karena paling stabil untuk data eksternal.
+ * PROXY_LIST yang diperbarui: 
+ * AllOrigins (Metode GET) adalah yang paling stabil untuk menghindari limitasi header.
  */
 const PROXY_LIST = [
   (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-  (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`
+  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  // ThingProxy ditaruh terakhir karena sering gagal (berdasarkan log Anda)
+  (url) => `https://thingproxy.freeboard.io/fetch/${url}`
 ];
 
-// --- 1. Manajemen Cache ---
+// --- 1. Manajemen Cache (LocalStorage) ---
 const getStorageCache = () => {
   try {
     const saved = localStorage.getItem('news_cache_persistent');
     if (!saved) return new Map();
     const parsed = JSON.parse(saved);
     const now = Date.now();
-    const cleanData = parsed.filter(([_, v]) => now - v.at < 259200000); // 3 Hari
+    // Pruning data > 3 hari
+    const cleanData = parsed.filter(([_, v]) => now - v.at < 259200000);
     return new Map(cleanData);
   } catch (e) {
     return new Map();
@@ -37,8 +39,8 @@ const saveToStorage = () => {
   }
 };
 
-// --- 2. Helper Fetch ---
-const fetchWithTimeout = async (url, options = {}, timeout = 5000) => {
+// --- 2. Helper Fetch dengan Timeout yang lebih ketat ---
+const fetchWithTimeout = async (url, options = {}, timeout = 4000) => {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
@@ -52,27 +54,22 @@ const fetchWithTimeout = async (url, options = {}, timeout = 5000) => {
 };
 
 /**
- * 3. IMPLEMENTASI SEKTOR TERPISAH
- * Memastikan CNN & CNBC tidak memanggil kategori yang salah
+ * 3. getNews dengan Sektor Terpisah & Mapping Otomatis
  */
 export const getNews = async (source = 'cnbc-news', category = '', signal = null) => {
-  
-  // LOGIC GATEWAY: Normalisasi Kategori Berdasarkan Sektor Sumber
+  // Mapping otomatis untuk mencegah Status 400
   let targetCategory = category?.toLowerCase();
   
-  // Sektor Bisnis/Tech (CNBC)
   if (source === 'cnbc-news') {
     const cnbcMap = {
       'ekonomi': 'market',
-      'teknologi': 'tech',
       'nasional': 'news',
       'internasional': 'news',
+      'teknologi': 'tech',
       'terbaru': ''
     };
     targetCategory = cnbcMap[targetCategory] || targetCategory;
-  } 
-  // Sektor Umum (CNN)
-  else if (source === 'cnn-news') {
+  } else if (source === 'cnn-news') {
     const cnnMap = {
       'market': 'ekonomi',
       'tech': 'teknologi',
@@ -84,22 +81,15 @@ export const getNews = async (source = 'cnbc-news', category = '', signal = null
   const path = targetCategory ? `${source}/${targetCategory}` : source;
   const targetUrl = `${BASE_URL}/${path}`;
   
-  // A. CEK CACHE
+  // A. CEK CACHE (Prioritas Utama)
   const cached = cache.get(targetUrl);
   if (cached && (Date.now() - cached.at < CACHE_TTL_MS)) {
     return cached.data;
   }
 
-  // B. STRATEGI FETCH BERLAPIS
+  // B. JALUR 1: Direct Fetch (Coba cepat)
   try {
-    const response = await fetchWithTimeout(targetUrl, { signal }, 4000);
-    
-    // Jika masih kena 400 (Sektor benar-benar tidak ada di API tersebut)
-    if (response.status === 400) {
-       console.warn(`Sektor ${targetCategory} tidak ditemukan di ${source}. Redirecting...`);
-       return getNews(source, '', signal); // Fallback ke berita utama
-    }
-
+    const response = await fetchWithTimeout(targetUrl, { signal }, 3000);
     if (response.ok) {
       const result = await response.json();
       const data = result.data || [];
@@ -109,33 +99,40 @@ export const getNews = async (source = 'cnbc-news', category = '', signal = null
       }
       return data;
     }
+    if (response.status === 400) return getNews(source, '', signal);
   } catch (err) {
-    if (err.name === 'AbortError') return cached?.data || [];
+    // Abaikan error CORS/Timeout di sini, langsung lanjut ke Proxy
   }
 
-  // JALUR PROXY (Jika Direct Fetch kena CORS status 200/403)
+  // C. JALUR 2: Proxy Berseri (Failover)
   for (const getProxyUrl of PROXY_LIST) {
     try {
       const proxyUrl = getProxyUrl(targetUrl);
-      const res = await fetchWithTimeout(proxyUrl, {}, 6000);
+      const res = await fetchWithTimeout(proxyUrl, {}, 5000);
       
       if (!res.ok) continue;
 
       const json = await res.json();
-      const rawData = json.contents ? JSON.parse(json.contents) : json;
-      
-      if (rawData.status === 400) continue; 
+      // AllOrigins butuh JSON.parse pada properti 'contents'
+      let actualData;
+      if (json.contents) {
+        actualData = JSON.parse(json.contents);
+      } else {
+        actualData = json;
+      }
 
-      const data = rawData.data || [];
+      const data = actualData.data || [];
       if (data.length > 0) {
         cache.set(targetUrl, { data, at: Date.now() });
         saveToStorage();
         return data;
       }
     } catch (proxyErr) {
-      continue;
+      console.warn("Proxy Error, mencoba alternatif...");
+      continue; 
     }
   }
 
+  // JALUR TERAKHIR: Berikan data basi daripada kosong
   return cached ? cached.data : [];
 };
