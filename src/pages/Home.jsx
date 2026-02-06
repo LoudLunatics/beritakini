@@ -20,35 +20,51 @@ const Home = () => {
 
   useEffect(() => {
     const ac = new AbortController();
+    
     const fetchHomeData = async () => {
-      try {
-        setLoading(true);
-        const responses = await Promise.all(
-          NEWS_SOURCES.map(async (source) => {
-            try {
-              const data = await getNews(source.id, '', ac.signal);
-              return Array.isArray(data) ? data.map(item => ({ ...item, source: source.label })) : [];
-            } catch (error) {
-              if (error.name === 'AbortError') throw error;
-              console.error(`Gagal memuat berita dari ${source.label}:`, error);
-              return []; // Tetap lanjut meski satu sumber gagal
-            }
-          })
-        );
-        if (!ac.signal.aborted) {
-          const newsArray = responses.flatMap(data => (Array.isArray(data) ? data : []));
-          setNews(newsArray);
+      setLoading(true);
+      setNews([]); // Reset data saat fetch ulang
+
+      // Optimal: Jalankan semua request secara paralel, 
+      // tapi tangani hasilnya segera setelah masing-masing selesai (Incremental)
+      const fetchPromises = NEWS_SOURCES.map(async (source) => {
+        try {
+          const data = await getNews(source.id, '', ac.signal);
+          
+          if (!ac.signal.aborted && Array.isArray(data) && data.length > 0) {
+            const formattedData = data.map(item => ({ ...item, source: source.label }));
+            
+            // Masukkan data ke state segera setelah tersedia (Tanpa menunggu sumber lain)
+            setNews(prev => {
+              const updated = [...prev, ...formattedData];
+              // Opsional: Urutkan berdasarkan tanggal jika ada field isoDate
+              return updated.sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
+            });
+            
+            // Matikan loading segera setelah data pertama masuk agar UI muncul
+            setLoading(false); 
+          }
+        } catch (error) {
+          if (error.name !== 'AbortError') {
+            console.error(`Gagal memuat berita dari ${source.label}:`, error);
+          }
         }
-      } catch (err) {
-        if (err.name !== 'AbortError') setNews([]);
+      });
+
+      // Tunggu semua selesai di background hanya untuk memastikan status loading mati 
+      // jika semua sumber ternyata gagal total
+      try {
+        await Promise.all(fetchPromises);
       } finally {
         if (!ac.signal.aborted) setLoading(false);
       }
     };
+
     fetchHomeData();
     return () => ac.abort();
   }, []);
 
+  // --- Bagian Search & Filter (Tetap Sama) ---
   useEffect(() => {
     const delayDebounce = setTimeout(() => {
       setSearchTerm(searchInput);
@@ -72,6 +88,7 @@ const Home = () => {
 
   return (
     <Container className="pb-5" aria-busy={loading}>
+      {/* UI Render (Logika tetap sama agar tidak merusak tampilan) */}
       {!loading && news.length > 0 && (
         <>
           <HeroCarousel data={heroData} />
@@ -79,7 +96,6 @@ const Home = () => {
         </>
       )}
 
-      {/* Header & Search Bar */}
       <div className="d-flex flex-column flex-md-row justify-content-between align-items-md-end mb-4 mt-5 gap-3">
         <h4 className="section-title mb-0">Rekomendasi Berita Terbaru</h4>
         <InputGroup className="search-input-group">
@@ -92,8 +108,7 @@ const Home = () => {
         </InputGroup>
       </div>
 
-      {/* Grid Berita */}
-      {loading ? (
+      {loading && news.length === 0 ? (
         <NewsSkeleton count={SKELETON_CARD_COUNT_HOME} />
       ) : (
         <Row>
@@ -103,12 +118,12 @@ const Home = () => {
             ))
           ) : (
             <div className="text-center py-5 w-100">
-              {news.length === 0 ? (
+              {!loading && news.length === 0 ? (
                 <>
                   <p className="text-muted mb-2">Gagal memuat berita.</p>
-                  <p className="text-muted small">Periksa koneksi internet atau coba refresh halaman.</p>
+                  <p className="text-muted small">Server sedang sibuk, silakan coba beberapa saat lagi.</p>
                 </>
-              ) : (
+              ) : !loading && (
                 <p className="text-muted">Tidak ada berita yang cocok dengan &quot;{searchTerm}&quot;</p>
               )}
             </div>
@@ -116,7 +131,6 @@ const Home = () => {
         </Row>
       )}
 
-      {/* Pagination */}
       {!loading && filteredNews.length > ITEMS_PER_PAGE_HOME && (
         <NewsPagination 
           currentPage={currentPage}
