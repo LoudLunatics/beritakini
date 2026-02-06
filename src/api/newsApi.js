@@ -2,20 +2,24 @@ import { CACHE_TTL_MS } from '../constants/config';
 
 const BASE_URL = 'https://berita-indo-api-next.vercel.app/api';
 
+/**
+ * UPGRADE PROXY: Menempatkan AllOrigins sebagai garda terdepan 
+ * karena paling stabil untuk data eksternal.
+ */
 const PROXY_LIST = [
   (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  (url) => `https://thingproxy.freeboard.io/fetch/${url}`
+  (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
+  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`
 ];
 
-// --- 1. Manajemen Cache (Tetap sama, dioptimalkan proses simpan) ---
+// --- 1. Manajemen Cache ---
 const getStorageCache = () => {
   try {
     const saved = localStorage.getItem('news_cache_persistent');
     if (!saved) return new Map();
     const parsed = JSON.parse(saved);
     const now = Date.now();
-    const cleanData = parsed.filter(([_, v]) => now - v.at < 259200000);
+    const cleanData = parsed.filter(([_, v]) => now - v.at < 259200000); // 3 Hari
     return new Map(cleanData);
   } catch (e) {
     return new Map();
@@ -33,7 +37,7 @@ const saveToStorage = () => {
   }
 };
 
-// --- 2. Helper Fetch (Tetap sama) ---
+// --- 2. Helper Fetch ---
 const fetchWithTimeout = async (url, options = {}, timeout = 5000) => {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -48,14 +52,36 @@ const fetchWithTimeout = async (url, options = {}, timeout = 5000) => {
 };
 
 /**
- * 3. UPGRADED getNews
- * Menangani mapping kategori otomatis agar tidak Error 400
+ * 3. IMPLEMENTASI SEKTOR TERPISAH
+ * Memastikan CNN & CNBC tidak memanggil kategori yang salah
  */
 export const getNews = async (source = 'cnbc-news', category = '', signal = null) => {
-  // UPGRADE: Normalisasi Kategori
-  // Beberapa API butuh kategori spesifik, jika 'terbaru' atau kosong, langsung ke source
-  const cleanCategory = category?.toLowerCase() === 'terbaru' ? '' : category;
-  const path = cleanCategory ? `${source}/${cleanCategory}` : source;
+  
+  // LOGIC GATEWAY: Normalisasi Kategori Berdasarkan Sektor Sumber
+  let targetCategory = category?.toLowerCase();
+  
+  // Sektor Bisnis/Tech (CNBC)
+  if (source === 'cnbc-news') {
+    const cnbcMap = {
+      'ekonomi': 'market',
+      'teknologi': 'tech',
+      'nasional': 'news',
+      'internasional': 'news',
+      'terbaru': ''
+    };
+    targetCategory = cnbcMap[targetCategory] || targetCategory;
+  } 
+  // Sektor Umum (CNN)
+  else if (source === 'cnn-news') {
+    const cnnMap = {
+      'market': 'ekonomi',
+      'tech': 'teknologi',
+      'terbaru': ''
+    };
+    targetCategory = cnnMap[targetCategory] || targetCategory;
+  }
+
+  const path = targetCategory ? `${source}/${targetCategory}` : source;
   const targetUrl = `${BASE_URL}/${path}`;
   
   // A. CEK CACHE
@@ -65,15 +91,13 @@ export const getNews = async (source = 'cnbc-news', category = '', signal = null
   }
 
   // B. STRATEGI FETCH BERLAPIS
-  
-  // Jalur 1: Coba Direct Fetch
   try {
     const response = await fetchWithTimeout(targetUrl, { signal }, 4000);
     
-    // UPGRADE: Handle status 400 (Kategori tidak ditemukan di source ini)
-    if (response.status === 400 && cleanCategory) {
-       console.warn(`Kategori ${cleanCategory} tidak ada di ${source}, fallback ke terbaru.`);
-       return getNews(source, '', signal); // Fallback otomatis ke berita utama source tsb
+    // Jika masih kena 400 (Sektor benar-benar tidak ada di API tersebut)
+    if (response.status === 400) {
+       console.warn(`Sektor ${targetCategory} tidak ditemukan di ${source}. Redirecting...`);
+       return getNews(source, '', signal); // Fallback ke berita utama
     }
 
     if (response.ok) {
@@ -89,7 +113,7 @@ export const getNews = async (source = 'cnbc-news', category = '', signal = null
     if (err.name === 'AbortError') return cached?.data || [];
   }
 
-  // Jalur 2: Coba Proxy secara berurutan
+  // JALUR PROXY (Jika Direct Fetch kena CORS status 200/403)
   for (const getProxyUrl of PROXY_LIST) {
     try {
       const proxyUrl = getProxyUrl(targetUrl);
@@ -100,7 +124,6 @@ export const getNews = async (source = 'cnbc-news', category = '', signal = null
       const json = await res.json();
       const rawData = json.contents ? JSON.parse(json.contents) : json;
       
-      // UPGRADE: Validasi data proxy agar tidak simpan error 400
       if (rawData.status === 400) continue; 
 
       const data = rawData.data || [];
